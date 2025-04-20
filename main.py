@@ -2,178 +2,126 @@ import os
 import argparse
 import multiprocessing
 import numpy as np
-from feature_extractor import extract_features
-from similarity_calculator import find_most_similar # Already updated for weights and trimming
-from sklearn.preprocessing import MinMaxScaler
+# import logging # removed logging import
+import pickle
+from feature_extractor import process_audio_files # updated import
+from similarity_calculator import calculate_all_similarities, write_similarities_to_csv
+from similarity_calculator import extract_lyrics_text # removed unused imports
+from lyrics_analyzer import LyricsAnalyzer
+# removed minmaxscaler as scaling is now done in feature_extractor
 
-# helper function for parallel processing: extracts features for one song
-def process_song(file_path):
-    """extracts features for a single song file."""
-    filename = os.path.basename(file_path)
-    try:
-        features = extract_features(file_path)
-        if features is not None:
-            # print(f"successfully extracted features for {filename}.") # moved print outside
-            return file_path, features
-        else:
-            # print(f"warning: could not extract features for {filename}. skipping.") # moved print outside
-            return file_path, None
-    except Exception as e:
-        # print(f"error processing {filename}: {e}. skipping.") # moved print outside
-        # return the error message string to distinguish from successful 'None' returns
-        return file_path, f"Error: {e}"
-# decided to keep this, shows full train of production, I downloaded my entire playlist from spotify using 
-# its share link, and inputted that to SPOTDOWNLOADER.COM, which gave me the .webm
-def trim_filename_main(filepath):
-    """trims the specific prefix '[SPOTDOWNLOADER.COM] ' from a filename's basename."""
-    prefix = '[SPOTDOWNLOADER.COM] '
-    basename = os.path.basename(filepath)
-    if basename.startswith(prefix):
-        # return only the part of the filename *after* the prefix
-        # note: this differs slightly from the calculator's trim which might modify the full path
-        # for display in main, just modifying the basename is sufficient
-        return basename[len(prefix):]
-        # If full path modification is needed:
-        # return filepath.replace(prefix, '', 1) # alternative: modify full path
-    return basename # return original basename if prefix wasn't found
+# configure logging # removed logging configuration
+# logging.basicconfig(level=logging.info, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# define the cache file path
+CACHE_FILE = "audio_features.pkl" # use relative path within 521-music-rec dir
+
+# removed process_song helper function as parallel processing is removed
 
 def main():
     """
-    main function to find similar songs based on extracted features.
-    parses command-line arguments for the songs directory, extracts features
-    from all .wav files in parallel, scales features, calculates similarity
-    for each song against all others, and prints recommendations.
+    main function to find similar songs based on audio features.
+    parses args for songs directory, extracts features from .wav files,
+    scales features, calculates similarity, and writes results to csv.
     """
-    parser = argparse.ArgumentParser(description="Find similar songs based on audio features.")
-    parser.add_argument("--songs_dir", required=True, help="Path to the directory containing .wav song files.")
-    # parser.add_argument("--target_song", required=True, help="filename of the target song within the songs directory.") # removed target_song argument
+    parser = argparse.ArgumentParser(description="find similar songs based on audio features.")
+    parser.add_argument("--songs_dir", required=True, help="path to the base directory containing song subdirectories (e.g., 'songs').")
+    # removed --limit argument as feature extraction handles all songs now
 
     args = parser.parse_args()
 
-    # validate the provided songs directory path
+    # validate the songs directory path
     if not os.path.isdir(args.songs_dir):
-        print(f"Error: Songs directory not found or is not a directory: {args.songs_dir}")
+        print(f"error: songs directory not found or is not a directory: {args.songs_dir}")
         return
 
-    # target song validation removed as we now iterate through all songs
+    print(f"running feature extraction using essentia (will create/update {CACHE_FILE})...")
+    # call the unified feature extraction function from feature_extractor
+    # this function handles finding files, extracting, scaling, and saving the cache.
+    process_audio_files(songs_dir=args.songs_dir, output_file=CACHE_FILE)
+    print("feature extraction process complete.")
 
-    print(f"Processing songs in directory: {args.songs_dir}")
-    # print(f"target song: {args.target_song}") # removed target_song print
+    # --- load features from the cache file created by process_audio_files ---
+    print(f"loading processed features from {CACHE_FILE}...")
+    if not os.path.exists(CACHE_FILE):
+        print(f"error: cache file {CACHE_FILE} not found after feature extraction.")
+        return
 
-    all_features = []
+    # try: # removed try/except block
+    with open(CACHE_FILE, 'rb') as f:
+        # the cache now contains a dictionary: {'song_name': scaled_feature_vector}
+        features_dict = pickle.load(f)
+    if not features_dict:
+        print("error: no features found in the cache file.")
+        return
+    print(f"successfully loaded features for {len(features_dict)} songs from {CACHE_FILE}.")
+    # except exception as e: # removed try/except block
+        # print(f"error loading features from cache file {cache_file}: {e}")
+        # return
+
+    # --- reconstruct ordered lists for similarity calculation ---
+    # sort by song name to ensure consistent order
+    sorted_song_names = sorted(features_dict.keys())
+
     all_filepaths = []
-    wav_files = [f for f in os.listdir(args.songs_dir) if f.lower().endswith('.wav')]
+    all_features_list = []
+    for song_name in sorted_song_names:
+        # construct the expected full path to the audio file
+        # assumes structure: args.songs_dir / song_name / audio.wav
+        file_path = os.path.join(args.songs_dir, song_name, 'audio.wav')
+        all_filepaths.append(file_path)
+        all_features_list.append(features_dict[song_name])
 
-    if not wav_files:
-        print(f"Error: No .wav files found in the directory: {args.songs_dir}")
-        return
+    # convert list of feature vectors to a numpy array
+    scaled_features = np.array(all_features_list)
 
-    # --- parallel feature extraction ---
-    num_songs = len(wav_files)
-    print(f"\nStarting feature extraction for {num_songs} songs using multiprocessing...")
+    if not scaled_features.size > 0:
+         print("warning: no features loaded or reconstructed. cannot proceed with similarity calculation.")
+         return # exit if no features to compare
 
-    # use a context manager for the multiprocessing pool to ensure proper cleanup
-    results_async = []
-    # determine number of processes - use cpu_count() or a fixed number
-    # example: use half the available cpu cores, but at least 1
-    num_processes = max(1, multiprocessing.cpu_count() // 2)
-    print(f"using {num_processes} worker processes.")
-    
-    with multiprocessing.Pool(processes=num_processes) as pool:
-        for i, filename in enumerate(wav_files):
-            file_path = os.path.join(args.songs_dir, filename)
-            print(f"processing song #{i+1}/{num_songs}: {filename}") # simple progress indicator
-            # asynchronously apply the process_song function to the file path
-            async_result = pool.apply_async(process_song, (file_path,))
-            results_async.append(async_result) # store the async result object
+    print("\n--- processing lyrics and calculating all song similarities ---")
 
-        # prevent new tasks from being submitted
-        pool.close()
-        # wait for all worker processes to finish
-        pool.join()
-
-    print("\nFeature extraction complete. Processing results...")
-    processed_count = 0
-    error_count = 0
-    for result in results_async:
-        try:
-            file_path, features_or_error = result.get()
-            if isinstance(features_or_error, np.ndarray):
-                all_features.append(features_or_error)
-                all_filepaths.append(file_path)
-                processed_count += 1
-                # optional: print success per file here if needed
-                # print(f"successfully processed: {os.path.basename(file_path)}")
-            elif isinstance(features_or_error, str) and features_or_error.startswith("Error:"):
-                 print(f"Error processing {os.path.basename(file_path)}: {features_or_error}")
-                 error_count += 1
-            else: # should be none if feature extraction failed gracefully within process_song
-                print(f"warning: could not extract features for {os.path.basename(file_path)}. skipping.")
-                error_count += 1
-        except Exception as e:
-            # this catches errors during the result.get() call itself (less likely)
-            print(f"error retrieving result for a task: {e}")
-            error_count += 1
-
-    print(f"\nProcessed {processed_count} songs successfully, {error_count} songs failed or were skipped.")
-
-    if not all_filepaths:
-        print("Error: No features could be extracted from any song.")
-        return
-    # convert the list of feature arrays into a single 2d numpy array
-    all_features_np = np.array(all_features)
-
-    # --- feature scaling ---
-    # scale features to the range [0, 1] using minmaxscaler
-    # this prevents features with larger ranges from dominating the distance calculation
-    scaled_features = all_features_np # default to original if scaling fails or is skipped
-    if all_features_np.size > 0:
-        print("\nScaling features...")
-        scaler = MinMaxScaler()
-        scaled_features = scaler.fit_transform(all_features_np)
-        print("Features scaled.")
-    else:
-        print("warning: skipping scaling as no features were extracted.")
-        return # exit if no features to scale/compare
-
-    print("\n--- finding similar songs for each successfully processed track ---")
-
-    # define feature weights (optional)
-    # set to none to use equal weighting (default in similarity_calculator)
+    # define feature weights (optional) - same logic
     feature_weights = None
-    # example: if features had 31 dimensions, you could define weights like:
-    # feature_weights = np.array([1.0, 1.5, 1.0, ..., 2.0]) # must have 31 elements
-    # ensure the shape matches the actual number of features extracted (31 in this case)
-    if feature_weights is not None and len(all_features) > 0:
-        num_features_extracted = all_features[0].shape[0]
+    if feature_weights is not None and scaled_features.shape[1] > 0: # check scaled_features shape
+        num_features_extracted = scaled_features.shape[1] # get dimension from numpy array
         if feature_weights.shape[0] != num_features_extracted:
             print(f"warning: provided weights shape {feature_weights.shape} does not match extracted feature dimension ({num_features_extracted}). ignoring weights.")
-            feature_weights = None # reset to none if shape mismatch
+            feature_weights = None
+
+    # extract lyrics from song directories
+    print("extracting lyrics from song directories...")
+    # use args.songs_dir directly for lyrics extraction, assuming it's the base 'songs' directory
+    lyrics_map, languages_dict = extract_lyrics_text(args.songs_dir)
+    print(f"found lyrics for {len(lyrics_map)} songs")
+
+    # lyrics processing now handled inside calculate_all_similarities
+
+    # calculate all similarities at once
+    # calculate_all_similarities handles lyrics extraction/processing internally
+    all_similarities = calculate_all_similarities(
+        scaled_features,
+        all_filepaths,
+        weights=feature_weights
+        # no longer need to pass song_lyrics_features
+    )
+
+    if not all_similarities:
+        print("error: failed to calculate any similarities.")
+        return
+
+    print("\n--- writing similarities to csv ---")
+
+    # determine output directory
+    # output csv files to the current directory (where main.py is run from)
+    csv_output_directory = "."
+    print(f"writing csv output to the current directory ('{csv_output_directory}')")
+
+    write_similarities_to_csv(all_similarities, csv_output_directory)
+
+    print(f"\nprocessing complete. similarity results saved to '{os.path.join(csv_output_directory, 'song_similarities.csv')}'")
 
 
-    # iterate through each successfully processed song and find its recommendations
-    for target_index, target_song_path in enumerate(all_filepaths):
-        # trim filename prefix for display purposes
-        target_song_display_name = trim_filename_main(target_song_path)
-        print(f"\nCalculating similarities for: '{target_song_display_name}'")
-
-        # find recommendations for the current target song using the scaled features
-        # pass the optional weights to the similarity function
-        recommendations = find_most_similar(target_index, scaled_features, all_filepaths, weights=feature_weights)
-
-        print(f"Recommendations for '{target_song_display_name}':")
-        if not recommendations:
-            print("  No similar songs found (excluding the target song itself).")
-        else:
-            # display top n recommendations (e.g., top 5)
-            num_recommendations_to_show = min(len(recommendations), 5)
-            for i in range(num_recommendations_to_show):
-                rec_path, rec_score = recommendations[i]
-                # the 'rec_path' returned by find_most_similar should already be the trimmed filename
-                # (as handled by the trim_filename function within similarity_calculator.py)
-                print(f"  {i+1}. {rec_path} (similarity: {rec_score:.4f})") # use rec_path directly
-                # print(f"{i+1}. {rec_filename} (similarity: {rec_score:.4f})") # removed duplicate print
-
-# main execution block: runs only when the script is executed directly
+# main execution block: runs only when script executed directly
 if __name__ == "__main__":
     main()

@@ -1,134 +1,278 @@
-import librosa
+import os
+import pickle
 import numpy as np
-import warnings
+from sklearn.preprocessing import StandardScaler
+import essentia.standard as es
 
-def extract_features(file_path):
+
+def extract_essentia_features(file_path):
     """
-    extracts audio features from a .wav file using librosa.
+    extracts specific audio features using essentia, utilizing pickle caching.
+
+    checks for a cached '.pkl' file in the song's directory first. if found and valid,
+    loads features from cache. otherwise, extracts features using essentia and saves
+    them to the cache file.
 
     args:
         file_path (str): path to the .wav audio file.
 
     returns:
-        numpy.ndarray or None: a flat numpy array containing the extracted features
-                               (tempo, zcr, centroid, bandwidth, rms, beat_std,
-                                13 mfccs, 12 chroma) if successful, otherwise none.
-                                the array will have a shape of (31,).
+        numpy.ndarray or none: a numpy array containing extracted features
+                               [integratedloudness, loudnessrange, danceability, bpm, dynamiccomplexity].
+                               returns none if processing fails or features are invalid.
     """
-    try:
-        # suppress specific librosa warnings (e.g., about audioread) during loading
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=UserWarning)
-            # Load the audio file
-            # load the audio time series (y) and its original sample rate (sr)
-            y, sr = librosa.load(file_path, sr=None)
+    # caching logic
+    audio_dir = os.path.dirname(file_path)
+    cache_file_name = 'essentia_features.pkl'
+    cache_file_path = os.path.join(audio_dir, cache_file_name)
 
-        # 1. tempo and beat tracking
-        # tempo: estimated global tempo in beats per minute (bpm)
-        # beat_frames: frame indices corresponding to detected beat events
-        tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
-
-        # 2. beat regularity (standard deviation of beat intervals)
-        # convert beat frame indices to time in seconds
-        beat_times = librosa.frames_to_time(beat_frames, sr=sr)
-        # calculate the time difference between consecutive beats
-        beat_intervals = np.diff(beat_times)
-        if len(beat_intervals) > 1:
-            beat_interval_std = np.std(beat_intervals)
-        else:
-            # handle cases with 0 or 1 beats detected (resulting in 0 or 1 interval)
-            # standard deviation is not meaningful in these cases, so set to 0
-            beat_interval_std = 0.0
+    # check for cache
+    if os.path.exists(cache_file_path):
+        with open(cache_file_path, 'rb') as f:
+            cached_features = pickle.load(f)
+            # basic validation: check numpy array shape (44 features)
+            # basic validation: check numpy array shape (44 features)
+            if isinstance(cached_features, np.ndarray) and cached_features.shape == (44,):
+                return cached_features
+            # else: # invalid cache data, proceed to extraction
 
 
-        # 3. zero-crossing rate (rate at which the signal changes sign)
-        # often correlates with the noisiness or percussive nature of the sound
-        zcr = librosa.feature.zero_crossing_rate(y)
-        mean_zcr = np.mean(zcr)
+    # original feature extraction logic (if cache miss or load error)
+    features = {}
+    # load audio using audioloaders (handles various formats)
+    loader = es.AudioLoader(filename=file_path)
+    audio_data, sample_rate, num_channels, _, _, _ = loader()
+    
+    # keep original stereo format for algorithms expecting stereo input
+    # most essentia algorithms for feature extraction expect stereo input
+    audio = audio_data
+    
+    # proceed with feature extraction using original audio format
 
-        # 4. spectral centroid (indicates the 'center of mass' of the spectrum)
-        # relates to the perceived brightness of a sound
-        spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
-        mean_spectral_centroid = np.mean(spectral_centroid)
+    # convert stereo to mono for algorithms requiring it
+    if audio.shape[1] > 1:  # if stereo
+        # ensure float32 type
+        mono_audio = np.mean(audio, axis=1).astype(np.float32)
+    else:  # if already mono
+        # ensure 1d and float32
+        mono_audio = audio[:, 0].astype(np.float32)
 
-        # 5. spectral bandwidth (measures the width of the spectral band around the centroid)
-        spectral_bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
-        mean_spectral_bandwidth = np.mean(spectral_bandwidth)
+    # frame-based processing setup
+    frameSize = 2048
+    hopSize = 1024
+    sampleRate = sample_rate # use sample rate from loader
 
-        # 6. root mean square (rms) energy (related to perceived loudness)
-        rms = librosa.feature.rms(y=y)
-        mean_rms = np.mean(rms)
+    # initialize essentia algorithms for frame processing
+    frame_generator = es.FrameGenerator(audio=mono_audio, frameSize=frameSize, hopSize=hopSize, startFromZero=True)
+    window = es.Windowing(type='hann', zeroPadding=0) # no zero padding typically needed for these features
+    spectrum = es.Spectrum() # standard spectrum only outputs magnitude
+    spectral_centroid_time = es.SpectralCentroidTime(sampleRate=sampleRate)
+    hpcp_algo = es.HPCP(size=12, sampleRate=sampleRate) # 12 bins for hpcp
+    mfcc_algo = es.MFCC(numberCoefficients=13, sampleRate=sampleRate) # first 13 mfccs
 
-        # 7. mel-frequency cepstral coefficients (mfccs)
-        # capture timbral/textural aspects of the sound; commonly used in speech/music processing
-        # we take the first 13 coefficients
-        mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
-        # calculate the mean of each mfcc coefficient across all time frames (axis=1)
-        mean_mfccs = np.mean(mfccs, axis=1)
+    # calculate frequencies for fft bins (constant for all frames)
+    # number of bins in rfft output is framesize // 2 + 1
+    frequencies = np.fft.rfftfreq(n=frameSize, d=1.0/sampleRate)
+    # lists to store frame-wise results
+    centroid_frames = []
+    hpcp_frames = []
+    mfcc_frames = [] # store coefficient vectors per frame
 
-        # 8. chroma features (represent the distribution of energy across 12 pitch classes)
-        # useful for analyzing harmony and melody
-        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
-        # calculate the mean of each chroma bin across all time frames (axis=1)
-        mean_chroma = np.mean(chroma, axis=1)
+    # process audio frame by frame
+    for frame in frame_generator:
+        frame_windowed = window(frame)
+        magnitudes = spectrum(frame_windowed) # spectrum now only returns magnitudes
+        magnitudes = magnitudes.astype(np.float32) # convert to float32 for essentia compatibility
 
-        # combine all features into a single flat numpy array
-        # order: tempo, zcr, centroid, bandwidth, rms, beat_std, mfcc1-13, chroma1-12
-        feature_vector = np.concatenate((
-            # tempo is often returned as an array, take the first element
-            [tempo[0] if isinstance(tempo, np.ndarray) and tempo.size > 0 else tempo],
-            [mean_zcr],
-            [mean_spectral_centroid],
-            [mean_spectral_bandwidth],
-            [mean_rms],
-            [beat_interval_std], # our calculated beat regularity feature
-            mean_mfccs,
-            mean_chroma
-        ))
+        # spectral centroid
+        centroid_output = spectral_centroid_time(frame_windowed)
+        centroid = centroid_output # centroid works on time-domain windowed frame
+        centroid_frames.append(centroid)
 
-        return feature_vector
+        # hpcp
+        # hpcp requires spectrum magnitude and pre-calculated frequency vector
+        hpcp_output = hpcp_algo(magnitudes, frequencies) # use pre-calculated frequencies
+        hpcp_values = hpcp_output
+        hpcp_frames.append(hpcp_values) # append the 12 hpcp values for this frame
 
-    except Exception as e:
-        print(f"Error processing {file_path}: {e}")
+        # mfcc
+        # mfcc requires spectrum magnitude
+        mfcc_output = mfcc_algo(magnitudes) # use magnitudes from spectrum
+        _, mfcc_coeffs = mfcc_output # use the calculated magnitudes
+        mfcc_frames.append(mfcc_coeffs) # append the 13 coefficients for this frame
+
+    # aggregate frame-wise features
+    features['spectral_centroid_mean'] = np.mean(centroid_frames) if centroid_frames else 0.0
+
+    if hpcp_frames:
+        hpcp_matrix = np.array(hpcp_frames)
+        hpcp_means = np.mean(hpcp_matrix, axis=0)
+    else:
+        hpcp_means = np.zeros(12) # default if no frames
+    for i in range(12):
+        features[f'hpcp_mean_{i}'] = hpcp_means[i]
+
+    if mfcc_frames:
+        mfcc_matrix = np.array(mfcc_frames)
+        mfcc_means = np.mean(mfcc_matrix, axis=0)
+        mfcc_stds = np.std(mfcc_matrix, axis=0)
+    else:
+        mfcc_means = np.zeros(13) # default if no frames
+        mfcc_stds = np.zeros(13)  # default if no frames
+    for i in range(13):
+        features[f'mfcc_mean_{i}'] = mfcc_means[i]
+        features[f'mfcc_std_{i}'] = mfcc_stds[i]
+
+    # original feature extraction (loudness, danceability, bpm, dynamic complexity)
+
+    # 1. loudness (ebu r128) - requires stereo input
+    if num_channels == 2:
+        loudness_ebu = es.LoudnessEBUR128()
+        # use the original stereo audio data
+        loudness_results = loudness_ebu(audio)
+        # access correct indices for scalar loudness values
+        features['integratedLoudness'] = loudness_results[2] # integrated loudness
+        features['loudnessRange'] = loudness_results[3]    # loudness range
+        # handle potential loudness calculation failure by assigning defaults if needed
+        if features['integratedLoudness'] is None: features['integratedLoudness'] = 0.0 # default on error
+        if features['loudnessRange'] is None: features['loudnessRange'] = 0.0 # default on error
+    else:
+        # assign default values if audio is not stereo
+        features['integratedLoudness'] = 0.0
+        features['loudnessRange'] = 0.0
+
+    # 2. danceability - expects mono input
+    danceability_algo = es.Danceability()
+    danceability_results = danceability_algo(mono_audio)
+    features['danceability'] = danceability_results[0]
+
+    # 3. rhythm (bpm) - expects mono input
+    rhythm_algo = es.RhythmExtractor2013()
+    rhythm_results = rhythm_algo(mono_audio)
+    # check if bpm result is scalar and positive
+    if isinstance(rhythm_results[0], (int, float)) and rhythm_results[0] > 0:
+        bpm = rhythm_results[0]
+    else:
+        bpm = 0.0 # default to 0.0 if invalid or not a number
+    features['bpm'] = bpm
+    # handle potential rhythm extraction failure by assigning default if needed
+    if features['bpm'] is None: features['bpm'] = 0.0 # assign default on error
+
+
+    # 4. dynamic complexity - expects mono input
+    dynamic_complexity_algo = es.DynamicComplexity()
+    dynamic_complexity_results = dynamic_complexity_algo(mono_audio)
+    features['dynamicComplexity'] = dynamic_complexity_results[0]
+
+    # validation: ensure all features are scalar numbers
+    # define all expected feature keys
+    feature_keys = [
+        'integratedLoudness', 'loudnessRange', 'danceability', 'bpm', 'dynamicComplexity',
+        'spectral_centroid_mean'
+    ]
+    feature_keys.extend([f'hpcp_mean_{i}' for i in range(12)])
+    feature_keys.extend([f'mfcc_mean_{i}' for i in range(13)])
+    feature_keys.extend([f'mfcc_std_{i}' for i in range(13)])
+
+    for key in feature_keys:
+        value = features.get(key) # use .get() for safety
+        # allow none temporarily if feature failed, check later
+        if value is None:
+             features[key] = 0.0 # replace none with 0.0 to avoid type errors later
+             value = 0.0
+        elif not isinstance(value, (int, float, np.number)): # check if scalar number
+            # invalid feature type, return none to indicate failure
+            return None
+
+    # create numpy array only if all features are valid scalars
+    # build feature vector in defined order
+    feature_values = [
+        features['integratedLoudness'],
+        features['loudnessRange'],
+        features['danceability'],
+        features['bpm'],
+        features['dynamicComplexity'],
+        features['spectral_centroid_mean']
+    ]
+    feature_values.extend([features[f'hpcp_mean_{i}'] for i in range(12)])
+    feature_values.extend([features[f'mfcc_mean_{i}'] for i in range(13)])
+    feature_values.extend([features[f'mfcc_std_{i}'] for i in range(13)])
+
+    feature_vector = np.array(feature_values, dtype=np.float32) # ensure float type
+
+    # check for nan or inf values which can break standardscaler
+    if np.any(np.isnan(feature_vector)) or np.any(np.isinf(feature_vector)):
+        # invalid values found, return none
         return None
 
-# main execution block: runs only when the script is executed directly
-if __name__ == '__main__':
-    # example usage: demonstrates how to use the extract_features function
-    # note: this requires the 'soundfile' library to create a dummy file if needed
-    # replace 'example.wav' with an actual .wav file path for real testing
-    example_file = 'wav_songs/example.wav'
-    print(f"Attempting to extract features from: {example_file}")
+    # final check for expected vector length (44 features)
+    expected_length = 44
+    if feature_vector.shape[0] != expected_length:
+        # unexpected length, return none
+        return None
 
-    # attempt to create a dummy wav file if the example file doesn't exist
-    # this allows the example code to run without needing a pre-existing file
-    try:
-        import soundfile as sf
-        import os
-        if not os.path.exists('wav_songs'):
-            os.makedirs('wav_songs')
-        if not os.path.exists(example_file):
-             # create a short silent wav file for basic testing purposes
-            sr_test = 22050 # sample rate for the dummy file
-            duration_test = 1 # duration in seconds
-            # generate an array of zeros representing silence
-            silence = np.zeros(int(sr_test * duration_test))
-            sf.write(example_file, silence, sr_test)
-            print(f"Created dummy file: {example_file}")
-    except ImportError:
-        print("skipping dummy file creation: 'soundfile' library not installed.")
-    except Exception as e_create:
-         print(f"could not create dummy file: {e_create}")
+    # caching logic: save features before returning
+    with open(cache_file_path, 'wb') as f:
+        pickle.dump(feature_vector, f)
+
+    return feature_vector
 
 
-    features = extract_features(example_file)
+def process_audio_files(songs_dir='songs', output_file='audio_features.pkl'):
+    """
+    extracts features for all audio files in the specified directory,
+    applies standardscaler, and saves the results.
 
-    if features is not None:
-        print("Features extracted successfully:")
-        print(features)
-        print(f"Feature vector shape: {features.shape}")
-        # the feature vector should contain 31 elements:
-        # 1 (tempo) + 1 (beat_std) + 1 (zcr) + 1 (centroid) + 1 (bandwidth) + 1 (rms) + 13 (mfcc) + 12 (chroma) = 31
-        print(f"expected feature vector length: 31")
-    else:
-        print("Feature extraction failed.")
+    args:
+        songs_dir (str): directory containing subdirectories for each song.
+        output_file (str): path to save the final features dictionary (pickle file).
+    """
+    all_features_raw = []
+    song_paths_map = {} # map index back to song name/path after scaling
+    valid_indices = [] # track indices of successfully processed songs
+
+    song_index = 0
+    for song_name in sorted(os.listdir(songs_dir)):
+        song_dir_path = os.path.join(songs_dir, song_name)
+        if os.path.isdir(song_dir_path):
+            audio_file_path = os.path.join(song_dir_path, 'audio.wav')
+            if os.path.exists(audio_file_path):
+                features = extract_essentia_features(audio_file_path)
+                if features is not None:
+                    all_features_raw.append(features)
+                    # use song_name as key (assumed unique)
+                    song_paths_map[song_index] = song_name
+                    valid_indices.append(song_index)
+                    song_index += 1
+                # else: # skip song due to error
+
+    if not all_features_raw:
+        return
+
+    # convert list of feature vectors to numpy array for scaling
+    features_matrix_raw = np.array(all_features_raw)
+
+    # apply standardscaler
+    scaler = StandardScaler()
+    features_matrix_scaled = scaler.fit_transform(features_matrix_raw)
+
+    # create final dictionary mapping song names to scaled features
+    final_features = {}
+    for i, scaled_vector in enumerate(features_matrix_scaled):
+        original_index = valid_indices[i] # get original index before potential skips
+        song_name = song_paths_map[original_index]
+        final_features[song_name] = scaled_vector
+
+    # save the scaled features
+    with open(output_file, 'wb') as f:
+        pickle.dump(final_features, f)
+
+
+# example usage (optional, can be called from main.py)
+if __name__ == "__main__":
+    # allows running feature extraction independently if needed
+    # but main.py should ideally orchestrate this.
+    # warnings.warn("running feature_extractor.py directly. this is usually handled by main.py.") # removed warning
+    process_audio_files(songs_dir='songs', output_file='audio_features.pkl')
+
+# end of feature extraction module

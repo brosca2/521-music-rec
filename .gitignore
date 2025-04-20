@@ -1,2 +1,6 @@
 *.mp3
 *.wav
+.env
+/songs
+__pycache__/
+*.pkl

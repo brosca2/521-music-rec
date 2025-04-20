@@ -4,3 +4,11 @@ scikit-learn
 soundfile
 argparse
 pydub
+python-dotenv
+lyricsgenius
+langdetect
+requests
+pandas
+tabulate
+matplotlib
+essentia
