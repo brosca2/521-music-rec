@@ -246,10 +246,10 @@ def find_most_similar(target_index, all_features, all_filepaths, song_word_sets_
             final_sim = (0.55 * audio_sim) + 2 * (0.25 * lyrics_sim) + (0.2 * lang_sim)
             final_similarities[j] = final_sim
 
-            # logging.info(f"similarity between '{target_song_name}' and '{comp_song_name}': audio: {audio_sim:.4f}, lyrics ({lyrics_method}): {lyrics_sim:.4f}, language: {lang_sim:.4f}, final: {final_sim:.4f}") # removed log
+            print(f"similarity between '{target_song_name}' and '{comp_song_name}': audio: {audio_sim:.4f}, lyrics ({lyrics_method}): {lyrics_sim:.4f}, language: {lang_sim:.4f}, final: {final_sim:.4f}") # removed log
 
             # keep the print statement for backward compatibility
-            print(f"  - weighted result: (0.4 * audio:{audio_sim:.4f}) + (0.4 * lyrics ({lyrics_method}):{lyrics_sim:.4f}) + (0.2 * lang:{lang_sim:.1f}) = {final_sim:.4f}")
+            # print(f"  - weighted result: (0.4 * audio:{audio_sim:.4f}) + (0.4 * lyrics ({lyrics_method}):{lyrics_sim:.4f}) + (0.2 * lang:{lang_sim:.1f}) = {final_sim:.4f}")
 
     # --- 6. find top n recommendations ---
     # exclude the target song by setting its score low
@@ -375,7 +375,7 @@ def write_similarities_to_csv(all_similarities, output_dir):
     # sort dictionary items by song name (key) alphabetically
     sorted_items = sorted(all_similarities.items())
 
-    # try: # removed try/except block
+    # try:
     # use 'w' mode to overwrite the file each time
     with open(output_path, 'w', encoding='utf-8') as f:
         # write the standard format file

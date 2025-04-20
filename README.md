@@ -10,12 +10,15 @@ This project aims to recommend similar songs based on a multi-faceted analysis o
 *   Fetched lyrics are stored in text files within each song's directory: `songs/SONG_NAME/lyrics.txt`.
 *   Note: Initial audio processing steps like MP3-to-WAV conversion are considered deprecated in the current workflow, which assumes WAV files are already present. There were too many files in this workspace, so I removed it. There are converters online, however. 
 
-### 2. Audio Feature Extraction
+### 2. Audio Feature Extraction - Librosa vs Essentia
 
 *   The `feature_extractor.py` script utilizes the Essentia library to extract a comprehensive set of 44 low-level and high-level audio features from each `audio.wav` file.
-*   Key features include Mel-Frequency Cepstral Coefficients (MFCCs), Harmonic Pitch Class Profiles (HPCP), loudness, and Beats Per Minute (BPM).
+*   Key features include Mel-Frequency Cepstral Coefficients (MFCCs), Harmonic Pitch Class Profiles (HPCP), loudness, and Beats Per Minute (BPM). 
 *   Extracted features are scaled using `StandardScaler` from scikit-learn to ensure fair comparison.
 *   The scaled features for all songs are aggregated and stored in `audio_features.pkl`.
+
+**Deprecated Method:**
+*   The Librosa library was considered, and it was in fact a part of the preliminary project proposal. However, this had been left unchanged for a very long time, as I was unsure if there was a backup to some of the features it contained. The central problem with Librosa was that it was returning consistently high values across the board of every song comparison, that is, almost all 'audio' components were returning {0.89, 0.93, 0.98}, and contained very little variance in between (and on the lower end). As a result of some searching, we ended up going with the Essentia library (with it's stereo vs mono pickiness) and the spectrum of [-1, 1] seems to be much better.
 
 ### 3. Lyrical Feature Analysis
 
@@ -25,7 +28,7 @@ Two approaches to lyrical analysis have been considered:
     *   Managed by `lyrics_analyzer.py`.
     *   Lyrics undergo cleaning: conversion to lowercase, removal of punctuation, and filtering of common stopwords (taken from online).
     *   A set of unique, meaningful words is created for each song's lyrics.
-    *   These unique word sets are cached in `lyrics_analysis.pkl` for efficiency. This wasn't too hard with some searching.
+    *   These unique word sets are cached in `lyrics_analysis.pkl` using Pickle.
     *   The `similarity_calculator.py` script compares these word sets using Jaccard similarity to determine lyrical similarity based on shared vocabulary.
 
 *   **Advanced Method - BERT (Previous Iteration):**
@@ -33,7 +36,7 @@ Two approaches to lyrical analysis have been considered:
     *   Utilized DistilBERT embeddings to capture the semantic meaning of lyrics, going beyond simple word matching.
     *   Employed zero-shot emotion classification to identify emotional tones across 13 categories (e.g., {joy, sadness, anger, fear, love})
     *   Used ConceptNet to expand keywords with related concepts, specially for sparser lyrics. Example, "ocean" would branch out to "water", "sea", etc.
-    * Unfortunately was a previous iteration because it was too costly to retrain over and over, and I was unsure on how to handle cache optimization, as it goes a bit beyond the scope of my abilities to handle possibly training a transformer into the mix. This is for the implementation, as I understand the power that was (or could have been) leveragable.
+    * This (unfortunately) was a previous iteration because it was too costly to retrain over and over, and I was unsure on how to handle cache optimization, as it goes a bit beyond the scope of my abilities to handle possibly training a transformer into the mix. The choice to remove it was for the implementation, as I understand the power that was (or could have been) leveragable, possibly returning better values if it had been trained well. The re-introduction of this is "left as an exercise to the reader"!
 
 ### 4. Language Feature Detection
 
@@ -46,8 +49,8 @@ Two approaches to lyrical analysis have been considered:
 *   The final similarity score between any two songs is calculated in `similarity_calculator.py`.
 *   It's a weighted sum of the individual similarity components:
     *   `Similarity = (0.55 * Audio Similarity) + (0.50 * Lyrics Similarity) + (0.20 * Language Similarity)`
-    *   Audio Similarity is based on the cosine distance between scaled Essentia feature vectors- there might be a warning about type conversions, I tried to address them, it didn't seem to make the warning go away, but it still calculated everything out. This is based off of a range from [-1,1]
-    *   Lyrics Similarity is based on the Jaccard similarity of unique word sets-- the shared words among both songs not including the stop words from online. This is based off of a range from (0,1)
+    *   Audio Similarity is based on the cosine distance between scaled Essentia feature vectors- there might be a warning about type conversions, I tried to address them, it didn't seem to make the warning go away, but it still calculated everything out after some tuple extraction. This is based off of a range from [-1,1]
+    *   Lyrics Similarity is based on the Jaccard similarity of unique word sets-- the shared words among both songs not including the stop words from online. This is based off of a range from [0,1]
     *   Language Similarity is the binary (0 or 1) of whether two songs share any of the same languages in their lists (if either include more than 1).
 
 ## How to Run
@@ -77,19 +80,19 @@ Two approaches to lyrical analysis have been considered:
 
 ### Execution
 
-1.  **Fetch Lyrics:** Run the lyrics fetching script (requires the `.env` file).
+1.  **Fetch Lyrics:** Run the lyrics fetching script (requires the `.env` file). Edit whatever songs as needed.
     ```bash
     python fetch_lyrics.py --songs_dir songs
     ```
-2.  **Generate Language Files:** Run the language detection script.
+2.  **Generate Language Files:** Run the language detection script. Edit whatever languages as needed.
     ```bash
     python generate_language_files.py --songs_dir songs
     ```
-3.  **Run Main Pipeline:** Execute the main script to perform feature extraction and similarity calculation.
+3.  **Run Main Pipeline:** Execute the main script to perform feature extraction and similarity calculation. It will print results to the console and also to a .csv
     ```bash
     python main.py --songs_dir songs
     ```
 
 ## Output
 
-The script calculates pairwise similarities for all songs in the `songs` directory. The final recommendations are saved to `song_similarities.csv`. This file lists each source song and its top 5 most similar songs from the collection, ranked by the combined similarity score.
+The script calculates pairwise similarities for all the songs in the `songs` directory. The final recommendations are saved to `song_similarities.csv`. This file lists each source song and its top 5 most similar songs from the collection, ranked by the combined similarity score. Multiple trial and error attempts have proven that results can be *extremely* different when tweaking the weights. 
