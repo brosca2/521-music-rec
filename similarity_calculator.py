@@ -380,12 +380,12 @@ def write_similarities_to_csv(all_similarities, output_dir):
     with open(output_path, 'w', encoding='utf-8') as f:
         # write the standard format file
         for main_song_name, recommendations in sorted_items:
-            f.write(f"song: {main_song_name}\n") # write main song name
+            f.write(f"Song: {main_song_name}\n") # write main song name
             if recommendations:
                 for i, (rec_song_name, score) in enumerate(recommendations):
                     # format score as percentage string (e.g., 87.65%)
                     percentage_score = f"{score * 100:.2f}"
-                    f.write(f"recommended song {i+1}: {rec_song_name} - {percentage_score}% similarity\n")
+                    f.write(f"Recommended song {i+1}: {rec_song_name} - {percentage_score}% similarity\n")
             else:
                 f.write("no recommendations found.\n") # handle case with no recommendations
 
